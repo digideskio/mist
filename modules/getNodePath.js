@@ -6,53 +6,172 @@ Gets the right Node path
 @module getNodePath
 */
 
+const fs = require('fs');
 const path = require('path');
+const Q = require('bluebird');
+const exec = require('child_process').exec;
+const cmpVer = require('semver-compare');
 const binaryPath = path.resolve(__dirname + '/../nodes');
 const log = require('./utils/logger').create('getNodePath');
 const Settings = require('./settings');
 
 
 // cache
-const resolvedPaths = {};
+const paths = {},        // all versions (system + bundled):  { type: { path: version } }
+    resolvedPaths = {};  // only latest version per type
 
 
-module.exports = function(type) {
-    if (resolvedPaths[type]) {
-        return resolvedPaths[type];
-    }
+/**
+ * Get path of system node
+ *
+ * @param  {String} type   the type of node (i.e. 'geth', 'eth')
+ */
+function getSystemPath(type) {
+    return new Q((resolve, reject) => {
+        var proc = exec('type ' + type);
+        proc.stdout.on('data', resolve);
+        proc.stderr.on('data', reject);
+    });
+}
 
-    let ret = '';
 
-    // global override?
-    let globallySetType = Settings[`${type}Path`];
-    
-    if (globallySetType) {
-        resolvedPaths[type] = globallySetType;
-    } else {
-        var binPath = (Settings.inProductionMode)
-            ? binaryPath.replace('nodes','node') + '/'+ type +'/'+ type
-            : binaryPath + '/'+ type +'/'+ process.platform +'-'+ process.arch + '/'+ type;
+/**
+ * Get versions of node (system and bundled)
+ *
+ * @param  {String} type   the type of node (i.e. 'geth', 'eth')
+ * @param  {String} path   the path of the node instance
+ */
+function getVersion(type, path) {
+    return new Q((resolve, reject) => {
+        switch (type) {
+            case 'geth':
+                var command = path + ' version';
+                break;
+            case 'eth':
+            case 'parity':
+                var command = path + ' --version';
+                break;
+        }
+        var proc = exec(command);
+        proc.stdout.on('data', resolve);
+    });
+}
 
-        if(Settings.inProductionMode) {
-            binPath = binPath.replace('app.asar/','').replace('app.asar\\','');
-            
-            if(process.platform === 'darwin') {
-                binPath = path.resolve(binPath.replace('/node/', '/../Frameworks/node/'));
+
+/**
+ * Compare versions of system and bundled nodes
+ */
+function compareNodes() {
+    return new Q((resolve, reject) => {
+        for (let type in paths) {
+            var entries = Object.keys(paths[type]); 
+            var preferredPath = entries[0];
+            if (Object.keys(paths[type]).length > 1)
+                var preferredPath = (cmpVer(paths[type][entries[0]], paths[type][entries[1]])) 
+                    ? entries[1] : entries[0]
+            var version = paths[type][preferredPath];
+            resolvedPaths[type] = {};
+            resolvedPaths[type][preferredPath] = version;
+        }
+    });
+}
+
+
+module.exports = {
+    /**
+     * Returns path of node
+     * linux and mac only: returns system or bundled path depending on the latest version
+     *
+     * @param  {String} type   the type of node (i.e. 'geth', 'eth')
+     */
+    query: () => {
+        return resolvedPaths;
+    },
+    /**
+     * Evaluates node paths
+     *  - Enumerates bundled nodes
+     * linux and mac only:
+     *  - probes for system installation of nodes
+     *  - compares the versions of bundled and system nodes (preferres latest version)
+     */
+    probe: () => {    
+        return new Q((resolve, reject) => {                        
+            if(Settings.inProductionMode) {
+                var binPath = binaryPath.replace('nodes','node').replace('app.asar/','').replace('app.asar\\','');
+                
+                if(process.platform === 'darwin') {
+                    binPath = path.resolve(binPath.replace('/node', '/../Frameworks/node'));
+                }
+
+                fs.readdirSync(binPath).forEach((type) => {
+                    var nodePath = binPath + '/' + type + '/' + type;
+
+                    if(process.platform === 'win32') {
+                        nodePath = nodePath.replace(/\/+/,'\\');
+                        nodePath += '.exe';
+                    }
+
+                    paths[type] = {};
+                    paths[type][nodePath] = null;
+                });
+            } else {
+                fs.readdirSync('nodes/').forEach((type) => {
+                    if (fs.statSync('nodes/' + type).isDirectory()) {
+                        var nodePath = path.resolve('nodes/' + type + '/' + process.platform +'-'+ process.arch + '/' + type);
+                        paths[type] = {};
+                        paths[type][nodePath] = null;
+                    }
+                });
             }
-        }
+            
+            if (process.platform === 'linux' || process.platform === 'darwin') {
+                var getPathProms = [],
+                    getVersionProms = [];
 
+                for (let type in paths) {
+                    getPathProms.push(getSystemPath(type)
+                        .then((data) => {
+                            paths[type][data.match(/(\/\w+)+/)[0]] = null;
+                        })
+                        .catch((data) => {
+                            log.trace(data);
+                        })
+                    );
+                }
 
-        if(process.platform === 'win32') {
-            binPath = binPath.replace(/\/+/,'\\');
-            binPath += '.exe';
-        }
-
-        resolvedPaths[type] = binPath;
+                Q.all(getPathProms).then(() => {
+                    for (let type in paths) {
+                        for (let path in paths[type]) {
+                            getVersionProms.push(getVersion(type, path)
+                            .then((data) => {
+                                var version = data.match(/[\d.]+/)[0];
+                                paths[type][path] = version;
+                            }));
+                        }
+                    }
+                }).then(() => {
+                    Q.all(getVersionProms).then(() => {
+                        compareNodes();
+                        log.debug('Available backends:');
+                        Object.keys(paths).forEach((type) => {
+                            let i = 0;
+                            for (let path in paths[type]) {
+                                var name = (0 === i++) ? type + ' -' : type.replace(/./g, ' ') + '  '
+                                log.debug(name, paths[type][path], '=>', path);
+                            }
+                        });
+                    })                    
+                    .then(resolve, reject);
+                })
+            } else {
+                for (let type in paths) {
+                    for (let path in paths[type]) {
+                        resolvedPaths[type] = path;
+                    }
+                }
+                log.debug('Available backends: %j', paths);
+                resolve();
+            }
+        });
     }
-
-    log.debug(`Resolved path for ${type}: ${resolvedPaths[type]}`);
-
-    return resolvedPaths[type];
-};
-
-
+}

@@ -7,6 +7,7 @@ const shell = electron.shell;
 const log = require('./utils/logger').create('menuItems');
 const ipc = electron.ipcMain;
 const ethereumNode = require('./ethereumNode.js');
+const getNodePath = require('./getNodePath.js');
 const Windows = require('./windows');
 const updateChecker = require('./updateChecker');
 const Settings = require('./settings');
@@ -338,46 +339,48 @@ var menuTempl = function(webviews) {
         }
     ];
 
-
-
-
-
     // add node switching menu
     devToolsMenu.push({
         type: 'separator'
     });
     // add node switch
-    if(process.platform === 'darwin' || process.platform === 'win32') {
-        devToolsMenu.push({
-            label: i18n.t('mist.applicationMenu.develop.ethereumNode'),
-            submenu: [
-              {
-                label: 'Geth 1.4.10 (Go)',
-                checked: ethereumNode.isOwnNode && ethereumNode.isGeth,
+    var resolvedPaths = getNodePath.query();
+    if (Object.keys(resolvedPaths).length > 1) {
+        var nodes = [];
+        for (let type in resolvedPaths)
+            nodes.push({
+                label: type.charAt(0).toUpperCase() + type.slice(1) 
+                    + ' (' + resolvedPaths[type][Object.keys(resolvedPaths[type])[0]] + ')',
+                checked: ethereumNode.isOwnNode && ethereumNode.type === type,
                 enabled: ethereumNode.isOwnNode,
                 type: 'checkbox',
                 click: function(){
-                    restartNode('geth');
+                    restartNode(type);
                 }
-              },
-              {
-                label: 'Eth 1.3.0 (C++)',
-                checked: ethereumNode.isOwnNode && ethereumNode.isEth,
-                enabled: ethereumNode.isOwnNode,
-                // enabled: false,
-                type: 'checkbox',
-                click: function(){
-                    restartNode('eth');
-                }
-              }
-        ]});
+            });
+        var submenu = { 'label': i18n.t('mist.applicationMenu.develop.ethereumNode') };
+        if (ethereumNode.state === undefined) {
+            submenu.label += ' (' + i18n.t('mist.applicationMenu.develop.starting') + ')';
+            submenu.enabled = false;
+        } else if (ethereumNode.isExternalNode) {
+            submenu.label += ' (' + i18n.t('mist.applicationMenu.develop.externalNode') + ')';
+            submenu.enabled = false;
+        } else if (nodes.length > 0) {
+            submenu.submenu =  nodes;
+        }
+        devToolsMenu.push(submenu);
     }
 
     // add network switch
-    devToolsMenu.push({
-        label: i18n.t('mist.applicationMenu.develop.network'),
-        submenu: [
-          {
+    var submenu = { label: i18n.t('mist.applicationMenu.develop.network') };
+    if (ethereumNode.state === undefined) {
+        submenu.label += ' (' + i18n.t('mist.applicationMenu.develop.starting') + ')';
+        submenu.enabled = false;
+    } else if (ethereumNode.isExternalNode) {
+        submenu.label += ' (' + i18n.t('mist.applicationMenu.develop.externalNode') + ')';
+        submenu.enabled = false;
+    } else {
+        submenu.submenu = [{
             label: i18n.t('mist.applicationMenu.develop.mainNetwork'),
             accelerator: 'CommandOrControl+Shift+1',
             checked: ethereumNode.isOwnNode && ethereumNode.isMainNetwork,
@@ -386,8 +389,8 @@ var menuTempl = function(webviews) {
             click: function(){
                 restartNode(ethereumNode.type, 'main');
             }
-          },
-          {
+        },
+        {
             label: 'Testnet (Morden)',
             accelerator: 'CommandOrControl+Shift+2',
             checked: ethereumNode.isOwnNode && ethereumNode.isTestNetwork,
@@ -396,8 +399,9 @@ var menuTempl = function(webviews) {
             click: function(){
                 restartNode(ethereumNode.type, 'test');
             }
-          }
-    ]});
+        }];
+    }
+    devToolsMenu.push(submenu);
 
 
     devToolsMenu.push({

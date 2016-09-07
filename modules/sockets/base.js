@@ -5,12 +5,14 @@ const EventEmitter = require('events').EventEmitter;
 
 const _ = global._;
 const log = require('../utils/logger').create('Sockets');
+const getNodePath = require('../getNodePath.js');
 
 
 
 const CONNECT_INTERVAL_MS = 1000;
 const CONNECT_TIMEOUT_MS = 3000;
 
+var getNodePathProm = [];
 
 /**
  * Socket connecting to Ethereum Node.
@@ -82,6 +84,9 @@ class Socket extends EventEmitter {
                     this._socket.on('error', (err) => {
                         if (STATE.CONNECTING === this._state) {
                             this._log.warn(`Connection failed, retrying after ${CONNECT_INTERVAL_MS}ms...`);
+
+                            if (Object.keys(getNodePath.query()).length == 0)
+                                getNodePathProm.push(getNodePath.probe());
 
                             connectTimerId = setTimeout(() => {
                                 this._socket.connect(connectConfig);
@@ -196,6 +201,7 @@ class Socket extends EventEmitter {
 
 
 exports.Socket = Socket;
+exports.getNodePathProm = getNodePathProm; 
 
 
 const STATE = exports.STATE = Socket.STATE = {
